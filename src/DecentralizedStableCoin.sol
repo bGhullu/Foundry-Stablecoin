@@ -29,16 +29,15 @@ import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensio
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- *  * @title DecentralizedStableCoin
- * @author: B. GHULLU
+ * @title DecentralizedStableCoin
+ * @author B.GHULLu
  * Minting: Algorithmic
  * Relative Stability: Pegged to USD
  *
  * This is the contract meant to be governed by DECEngine. This Contract is just the ERC20
-  implementation of our stablecoin system.    
+ * implementation of our stablecoin system.
  *
-*/
-
+ */
 contract DecentralizedStableCoin is ERC20Burnable, Ownable {
     error DecentralizedStableCoin_MustBeMoreThanZero();
     error DecentralizedStableCoin_BurnAmountExceedsBalance();
@@ -57,10 +56,7 @@ contract DecentralizedStableCoin is ERC20Burnable, Ownable {
         super.burn(_amount);
     }
 
-    function mint(
-        address _to,
-        uint256 _amount
-    ) external onlyOwner returns (bool) {
+    function mint(address _to, uint256 _amount) external onlyOwner returns (bool) {
         if (_to == address(0)) {
             revert DecentralizedStableCoin_NotZeroAddress();
         }
