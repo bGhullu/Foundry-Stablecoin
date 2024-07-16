@@ -60,6 +60,7 @@ contract DSCEngine is ReentrancyGuard {
     error DSC__TransferFailed();
     error DSCEngine__BreaksHealthFactor(uint256 userHealthFactor);
     error DSC_MintFailed();
+    error DSC__HealthFactorOK();
 
     ////////////////////////
     // State Variables    //
@@ -68,7 +69,8 @@ contract DSCEngine is ReentrancyGuard {
     uint256 private constant PRECISION = 1e18;
     uint256 private constant LIQIDATION_THRESHOLD = 50; // 200% overcollateralized
     uint256 private constant LIQIDATION_PRECISION = 100;
-    uint256 private constant MIN_HEALTH_FACTOR = 1;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
+    uint256 private constant LIQIDATION_BONUS = 10; // this mean a 10% bonus
 
     mapping(address token => address priceFeed) private s_priceFeeds;
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
@@ -81,7 +83,9 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////
 
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
-    event CollateralRedeemed(address indexed user, address indexed token, uint256 indexed amount);
+    event CollateralRedeemed(
+        address indexed redeemedFrom, address indexed redeemedTo, address indexed token, uint256 amount
+    );
     ///////////////////
     // Modifiers     //
     ///////////////////
@@ -179,12 +183,8 @@ contract DSCEngine is ReentrancyGuard {
         moreThanZero(amountCollateral)
         nonReentrant
     {
-        s_collateralDeposited[msg.sender][tokenCollateralAddress] -= amountCollateral;
-        emit CollateralRedeemed(msg.sender, tokenCollateralAddress, amountCollateral);
-        bool success = IERC20(tokenCollateralAddress).transfer(msg.sender, amountCollateral);
-        if (!success) {
-            revert DSC__TransferFailed();
-        }
+        _redeemCollateral(msg.sender, msg.sender, tokenCollateralAddress, amountCollateral);
+
         _revertIfHealthFactorIsBroken(msg.sender);
     }
 
@@ -205,16 +205,67 @@ contract DSCEngine is ReentrancyGuard {
     }
 
     function burnDsc(uint256 amountOfDsc) public moreThanZero(amountOfDsc) {
-        s_DSCMinted[msg.sender] -= amountOfDsc;
-        bool success = i_dsc.transferFrom(msg.sender, address(this), amountOfDsc);
-        if (!success) {
-            revert DSC__TransferFailed();
-        }
-        i_dsc.burn(amountOfDsc);
+        _burnDsc(amountOfDsc, msg.sender, msg.sender);
         _revertIfHealthFactorIsBroken(msg.sender); // I don't think this would ever hit.....
     }
 
-    function liquidate() external {}
+    // If we do start nearing undercollateralization, we need someone to liquidate positions
+
+    // $100 ETH backing $50 DSC
+    // If ETH price tank.. $20 ETH back $50 DSC <- DSC isn't worth $1
+
+    // $75 backing $50 DSC
+    // Liquidator take $75 backing and burns off the $50 DSC
+
+    // If someone is almost undercollateralized, we will pay you to liquidate them!
+
+    /**
+     *
+     * @param collateral The ERC20 collateral address to liquidate from the user
+     * @param user The user who has broken the health factor. Their _healthFactor should be
+     * below MIN_HEALTH_FACTOR
+     * @param debtToCover The amount of DSC you want to burn to improve the users health
+     * factor
+     * @notice You can partially liquidate a user
+     * @notice You will get a liquidation bonus for taking the users funds
+     * @notice This function working assumes the protocol will be roughly 200%
+     * overcollateralized in order for this to work
+     * @notice A known bug would be if the protocol were 100% or less collateralized, then
+     * we couldn't be able to incentive the liquidators
+     * For example, if the price of the collateral plummets before anyone could be liquidated.
+     *
+     * Follows CEI: Checks, Effects, Interactions
+     */
+    function liquidate(address collateral, address user, uint256 debtToCover)
+        external
+        moreThanZero(debtToCover)
+        nonReentrant
+    {
+        //need to check health factor of the user
+        uint256 startingUserHealthFactor = _healtFactor(user);
+        if (startingUserHealthFactor >= MIN_HEALTH_FACTOR) {
+            revert DSC__HealthFactorOK();
+        }
+        // We want to burn their DSC "debt"
+        // And take their collateral
+        // Bad User: $140 ETH, $100 DSC
+        // debtToCover = $100
+        // $100 of DSC = $ETH ?
+        // = 0.05 ETH
+        uint256 tokenAmountFromDebtCovered = getTokenAmountFromUsd(collateral, debtToCover);
+        // And give thme a 10% bonus
+        // So we are giving the liquidator $110 of WETH for 100 DSC
+        // We should implement a feature to liquidate in the event protocol is insolvent
+        // And sweep extra amounts into a treasury
+
+        // 0.05 ETH * 0.1 = 0.005 ETH. They will get 0.005+0.05 = 0.055 ETH in total
+        uint256 bonusCollateral = (tokenAmountFromDebtCovered * LIQIDATION_BONUS) / LIQIDATION_PRECISION;
+        uint256 totalCollateralToRedeem = tokenAmountFromDebtCovered + bonusCollateral;
+        _redeemCollateral(user, msg.sender, collateral, totalCollateralToRedeem);
+
+        // Burn DSC
+        _burnDsc(debtToCover, user, msg.sender);
+    }
 
     function getHealthFactor() external view {}
 
@@ -243,6 +294,31 @@ contract DSCEngine is ReentrancyGuard {
         (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
         uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQIDATION_THRESHOLD) / LIQIDATION_PRECISION;
         return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
+    }
+    /**
+     *
+     * @dev Low-level internal function, do not call unless the function calling it is
+     * checking for health factors being broken
+     */
+
+    function _burnDsc(uint256 amountOfDscToBurn, address onBehalfOf, address dscFrom) private {
+        s_DSCMinted[onBehalfOf] -= amountOfDscToBurn;
+        bool success = i_dsc.transferFrom(dscFrom, address(this), amountOfDscToBurn);
+        if (!success) {
+            revert DSC__TransferFailed();
+        }
+        i_dsc.burn(amountOfDscToBurn);
+    }
+
+    function _redeemCollateral(address from, address to, address tokenCollateralAddress, uint256 amountCollateral)
+        internal
+    {
+        s_collateralDeposited[from][tokenCollateralAddress] -= amountCollateral;
+        emit CollateralRedeemed(from, to, tokenCollateralAddress, amountCollateral);
+        bool success = IERC20(tokenCollateralAddress).transfer(to, amountCollateral);
+        if (!success) {
+            revert DSC__TransferFailed();
+        }
     }
 
     // 1. Check health factor (do they have enough collateral)
@@ -273,5 +349,15 @@ contract DSCEngine is ReentrancyGuard {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[_token]);
         (, int256 price,,,) = priceFeed.latestRoundData();
         return valueInUsd = (_amount * (ADDITIONAL_FEED_PRECISION * uint256(price))) / PRECISION;
+    }
+
+    function getTokenAmountFromUsd(address token, uint256 usdAmountinWei) public view returns (uint256) {
+        // price of token( e.g ETH)
+        // $/ETH ETH??
+        // $2000 / ETH $1000/$2000 = 0.5 ETH
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[token]);
+        (, int256 price,,,) = priceFeed.latestRoundData();
+
+        return (usdAmountinWei * PRECISION) / (uint256(price) * ADDITIONAL_FEED_PRECISION);
     }
 }
