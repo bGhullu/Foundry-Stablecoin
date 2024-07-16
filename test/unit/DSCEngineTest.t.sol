@@ -14,8 +14,10 @@ contract DSCEngineTest is Test {
     DecentralizedStableCoin dsc;
     DSCEngine dscEngine;
     HelperConfig config;
+    address btcUsdPriceFeed;
     address ethUsdPriceFeed;
     address weth;
+    address wbtc;
 
     address public USER = makeAddr("USER");
     uint256 public constant AMOUNT_COLLATERAL = 10 ether;
@@ -23,7 +25,22 @@ contract DSCEngineTest is Test {
     function setUp() public {
         deployer = new DeployDSC();
         (dsc, dscEngine, config) = deployer.run();
-        (ethUsdPriceFeed,, weth,,) = config.activeNetworkConfig();
+        (ethUsdPriceFeed, btcUsdPriceFeed, weth,,) = config.activeNetworkConfig();
+    }
+
+    //////////////////////////
+    //  Constructor Tests    //
+    ///////////////////////////
+    address[] tokenAddresses;
+    address[] priceFeedAddresses;
+
+    function testRevertsIfTokenLengthDoesntMatchPriceFeeds() public {
+        tokenAddresses.push(weth);
+        priceFeedAddresses.push(ethUsdPriceFeed);
+        priceFeedAddresses.push(btcUsdPriceFeed);
+
+        vm.expectRevert(DSCEngine.DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength.selector);
+        new DSCEngine(tokenAddresses, priceFeedAddresses, address(dsc));
     }
 
     /////////////////////
@@ -38,6 +55,13 @@ contract DSCEngineTest is Test {
         assertEq(expectedUsdValue, actualUsd);
     }
 
+    function testGetTokenAmountFromUsd() public view {
+        uint256 usdAmount = 100 ether;
+        // $2,000/ ETH, $100
+        uint256 expectedWeth = 0.05 ether;
+        uint256 actualWeth = dscEngine.getTokenAmountFromUsd(weth, usdAmount);
+        assertEq(actualWeth, expectedWeth);
+    }
     ////////////////////////////////
     //  depostCollateral Test     //
     ////////////////////////////////
