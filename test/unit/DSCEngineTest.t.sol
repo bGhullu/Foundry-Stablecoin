@@ -95,7 +95,7 @@ contract DSCEngineTest is Test {
             AMOUNT_COLLATERAL
         );
         vm.startPrank(USER);
-        vm.expectRevert(DSCEngine.DSC__NotAllowedToken.selector);
+        vm.expectRevert(DSCEngine.DSCEngine__NotAllowedToken.selector);
         dscEngine.depositCollateral(address(ranToken), AMOUNT_COLLATERAL);
         vm.stopPrank();
     }
